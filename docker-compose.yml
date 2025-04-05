@@ -1,0 +1,36 @@
+version: '3'
+
+services:
+  # Main SQL Agent service using purchase_behavior_app.py
+  sql_agent:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      # Default to LMStudio - change to http://host.docker.internal:11434 for Ollama
+      - LLM_API_URL=http://host.docker.internal:1234
+      # Optionally specify model when using Ollama
+      # - LLM_MODEL=llama3
+      - DATABASE_PATH=/app/sales_database.db
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Alternative service using the standard app.py
+  # Uncomment to use this instead of the default service
+  # sql_agent_standard:
+  #   build: .
+  #   ports:
+  #     - "8502:8501"
+  #   environment:
+  #     - LLM_API_URL=http://host.docker.internal:1234
+  #     - DATABASE_PATH=/app/sales_database.db
+  #   volumes:
+  #     - ./:/app
+  #   command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+  #   restart: unless-stopped
