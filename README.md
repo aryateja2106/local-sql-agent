@@ -14,8 +14,9 @@ It is tuned for **Data Quality Engineer interview prep** around the Southwest-st
   - `pipeline_database.db` — medallion / reconciliation / SCD drills
   - `sales_database.db` — original purchase/sales demo
 - Streamlit UI with model picker, dialect toggle, and few-shot examples
-- Read-only execution guard (`SELECT` / `WITH` / `EXPLAIN` only)
-- Retry loop that asks the model to repair failed SQL
+- Read-only execution guard (`SELECT` / `WITH` / `EXPLAIN` only) with noisy-output sanitization
+- Model-agnostic agentic harness: generate → sanitize → execute → repair → light verification
+- Accuracy eval script that scores by result equivalence against golden SQL
 - Curated NL→SQL datasets for DQE interview patterns
 - Hugging Face dataset: [`AryaYT/southwest-dqe-nl2sql`](https://huggingface.co/datasets/AryaYT/southwest-dqe-nl2sql)
 
@@ -119,7 +120,14 @@ python -m unittest test_sql_safety.py
 python setup_pipeline_database.py
 ```
 
-With a local model loaded:
+Accuracy harness (one model at a time; pauses between prompts to reduce heat):
+
+```bash
+./scripts/cool_load.sh
+python scripts/eval_accuracy.py --limit 6 --model gemma-4-12b-it-qat
+```
+
+With a local model loaded for a quick smoke test:
 
 ```bash
 python test_agent.py

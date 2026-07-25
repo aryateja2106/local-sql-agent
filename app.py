@@ -104,7 +104,7 @@ try:
 
     st.sidebar.caption("Thermal tip: one query at a time. Unload the model when finished.")
 
-    sql_agent = SQLAgent(str(db_path), llm_client, execute_sql=execute_sql)
+    sql_agent = SQLAgent(str(db_path), llm_client, max_retries=2, execute_sql=execute_sql)
 except Exception as e:
     st.error(f"Error initializing SQL Agent: {str(e)}")
     st.stop()
@@ -157,8 +157,12 @@ if st.button("Run Query", type="primary"):
                 st.write(response.explanation)
 
                 if response.improvement_history:
-                    with st.expander("Retry / repair history"):
+                    with st.expander(f"Retry / repair history ({len(response.improvement_history)} attempts)"):
                         st.json(response.improvement_history)
+                        st.caption(
+                            "Harness flow: generate → sanitize → execute → repair on SQLite/safety errors. "
+                            "Fewer repairs usually means cleaner first-pass SQL."
+                        )
 
                 if dialect == "redshift":
                     st.info("Redshift interview mode: SQL was generated for whiteboard practice and not executed locally.")
@@ -175,6 +179,8 @@ if st.button("Run Query", type="primary"):
                         )
                         st.dataframe(df, use_container_width=True)
                         st.caption(f"Returned {response.query_result.row_count} rows")
+                        if "Verification:" in (response.explanation or ""):
+                            st.success("Post-exec verification annotations were added to the explanation.")
                         st.download_button(
                             label="Download results as CSV",
                             data=df.to_csv(index=False),

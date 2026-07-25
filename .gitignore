@@ -64,5 +64,6 @@ schema.json
 
 # Local datasets / caches
 datasets/hf_southwest_dqe_nl2sql/
+datasets/eval_last_run.json
 .cache/
 *.db

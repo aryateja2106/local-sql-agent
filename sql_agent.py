@@ -9,10 +9,22 @@ if TYPE_CHECKING:
     from llm_client import LLMClient
 
 
-class SQLAgent:
-    """Agent for handling natural language to SQL conversion and execution."""
+FORBIDDEN_SQL = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|PRAGMA|VACUUM|COPY|GRANT|REVOKE)\b",
+    re.IGNORECASE,
+)
 
-    def __init__(self, db_path: str, llm_client: "LLMClient", max_retries: int = 3, execute_sql: bool = True):
+
+class SQLAgent:
+    """Model-agnostic NL→SQL agent with sanitize → execute → repair harness."""
+
+    def __init__(
+        self,
+        db_path: str,
+        llm_client: "LLMClient",
+        max_retries: int = 2,
+        execute_sql: bool = True,
+    ):
         self.db_path = db_path
         self.llm_client = llm_client
         self.conn = None
@@ -48,7 +60,6 @@ class SQLAgent:
                     schema_info += f"- {col_name} ({col_type}) {is_pk}\n"
 
                 try:
-                    # Keep samples tiny so local reasoning models do not blow the context window.
                     self.cursor.execute(f"SELECT * FROM {table} LIMIT 1;")
                     rows = self.cursor.fetchall()
                     if rows:
@@ -70,34 +81,99 @@ class SQLAgent:
 
     def generate_sql(self, request: SQLGenerationRequest, error_message: str = None) -> SQLGenerationResponse:
         response = self.llm_client.generate_sql(request.query, self.schema_info, error_message)
+        sql = self.sanitize_sql(response.get("sql_query", ""))
         return SQLGenerationResponse(
-            sql_query=response["sql_query"],
-            explanation=response["explanation"],
+            sql_query=sql,
+            explanation=response.get("explanation", ""),
         )
 
     @staticmethod
-    def is_read_only_sql(sql_query: str) -> bool:
-        """Reject obvious write operations before an LLM-generated query reaches SQLite."""
-        sql = re.sub(r"/\*.*?\*/|--[^\n]*", "", sql_query, flags=re.DOTALL).strip()
-        sql = sql.rstrip(";").strip()
-        if not sql or ";" in sql:
-            return False
+    def _split_first_statement(sql: str) -> Tuple[str, str]:
+        """Return (first_statement, remainder) splitting on the first top-level semicolon."""
+        in_single = False
+        in_double = False
+        for idx, ch in enumerate(sql):
+            if ch == "'" and not in_double:
+                in_single = not in_single
+            elif ch == '"' and not in_single:
+                in_double = not in_double
+            elif ch == ";" and not in_single and not in_double:
+                return sql[:idx].strip(), sql[idx + 1 :].strip()
+        return sql.strip(), ""
+
+    @classmethod
+    def sanitize_sql(cls, sql_query: str) -> str:
+        """Pull a single executable read-oriented statement out of noisy model output."""
+        if not sql_query:
+            return ""
+
+        sql = sql_query.strip()
+
+        # Recover JSON field before stripping quotes from the whole blob.
+        if re.search(r'"sql_query"\s*:', sql, flags=re.IGNORECASE):
+            match = re.search(r'"sql_query"\s*:\s*"(.*?)"\s*(,|})', sql, flags=re.DOTALL | re.IGNORECASE)
+            if match:
+                sql = match.group(1).encode("utf-8").decode("unicode_escape").strip()
+
+        sql = sql.replace("```sql", "```").replace("```SQL", "```")
+        if "```" in sql:
+            parts = sql.split("```")
+            if len(parts) >= 2 and parts[1].strip():
+                sql = parts[1].strip()
+
+        sql = re.sub(r"^(sql_query|sql)\s*[:=]\s*", "", sql, flags=re.IGNORECASE).strip()
+        sql = sql.strip().strip("`").strip()
+        if (sql.startswith('"') and sql.endswith('"')) or (sql.startswith("'") and sql.endswith("'")):
+            sql = sql[1:-1].strip()
+
+        start = re.search(r"\b(WITH|SELECT|EXPLAIN)\b", sql, flags=re.IGNORECASE)
+        if not start:
+            return ""
+        sql = sql[start.start() :].strip()
+        first, _remainder = cls._split_first_statement(sql)
+        return first
+
+    @classmethod
+    def read_only_rejection_reason(cls, sql_query: str) -> Optional[str]:
+        original = sql_query or ""
+        # Prefer fenced SQL when present so trailing prose cannot false-reject.
+        probe = original
+        if "```" in original:
+            parts = original.replace("```sql", "```").replace("```SQL", "```").split("```")
+            if len(parts) >= 2 and parts[1].strip():
+                probe = parts[1].strip()
+
+        start = re.search(r"\b(WITH|SELECT|EXPLAIN)\b", probe, flags=re.IGNORECASE)
+        if start:
+            _first, remainder = cls._split_first_statement(probe[start.start() :])
+            if remainder and FORBIDDEN_SQL.search(remainder):
+                return "Multiple statements detected; trailing write/DDL is not allowed."
+
+        sql = cls.sanitize_sql(sql_query)
+        if not sql:
+            return "Could not extract a SELECT/WITH/EXPLAIN statement from the model output."
 
         first_word = re.match(r"[A-Za-z]+", sql)
         if not first_word or first_word.group(0).upper() not in {"SELECT", "WITH", "EXPLAIN"}:
-            return False
+            return f"Query must start with SELECT/WITH/EXPLAIN (got {first_word.group(0) if first_word else 'empty'})."
 
-        forbidden = re.compile(
-            r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|PRAGMA|VACUUM|COPY)\b",
-            re.IGNORECASE,
-        )
-        return forbidden.search(sql) is None
+        forbidden = FORBIDDEN_SQL.search(sql)
+        if forbidden:
+            return f"Forbidden keyword in query: {forbidden.group(1).upper()}."
+        return None
+
+    @classmethod
+    def is_read_only_sql(cls, sql_query: str) -> bool:
+        return cls.read_only_rejection_reason(sql_query) is None
 
     def execute_sql(self, sql_query: str) -> Tuple[Optional[SQLQueryResult], Optional[str]]:
-        if not self.is_read_only_sql(sql_query):
-            return None, "Only one read-only SELECT, WITH ... SELECT, or EXPLAIN SELECT query is allowed."
+        # Reject on the raw payload first so trailing DROP/INSERT after a SELECT cannot pass.
+        reason = self.read_only_rejection_reason(sql_query)
+        if reason:
+            return None, f"Only one read-only SELECT, WITH ... SELECT, or EXPLAIN SELECT query is allowed. ({reason})"
+        sql = self.sanitize_sql(sql_query)
         try:
-            self.cursor.execute(sql_query)
+            self.cursor.execute(sql)
             rows = self.cursor.fetchall()
 
             if not rows:
@@ -112,14 +188,41 @@ class SQLAgent:
     def improve_sql(self, natural_query: str, failed_sql: str, error_message: str) -> SQLGenerationResponse:
         response = self.llm_client.improve_sql(natural_query, self.schema_info, failed_sql, error_message)
         return SQLGenerationResponse(
-            sql_query=response["sql_query"],
-            explanation=response["explanation"],
+            sql_query=self.sanitize_sql(response.get("sql_query", "")),
+            explanation=response.get("explanation", ""),
         )
 
+    def verify_result(
+        self,
+        natural_query: str,
+        result: SQLQueryResult,
+    ) -> Optional[Dict[str, Any]]:
+        """Lightweight post-exec checks. Golden checks live in scripts/eval_accuracy.py."""
+        checks = []
+        if result.row_count > 0 and not result.columns:
+            checks.append("missing_columns")
+
+        q = natural_query.lower()
+        if "bronze" in q and "quarantine" in q and "silver" in q and result.row_count == 1:
+            cols = {c.lower(): idx for idx, c in enumerate(result.columns)}
+            row = result.rows[0]
+            if "accounted_rows" in cols and "silver_rows" in cols and "quarantine_count" in cols:
+                accounted = row[cols["accounted_rows"]]
+                silver = row[cols["silver_rows"]]
+                quarantine = row[cols["quarantine_count"]]
+                if accounted == silver + quarantine:
+                    checks.append("accounted_rows_ok")
+                else:
+                    checks.append("accounted_rows_mismatch")
+            elif "bronze_plus_quarantine" in cols and "silver_count" in cols:
+                checks.append("batch_balance_shape_ok")
+        return {"checks": checks} if checks else None
+
     def process_query(self, natural_query: str) -> SQLAgentResponse:
+        """Agentic loop: generate → sanitize → execute → repair on real failures."""
         request = SQLGenerationRequest(query=natural_query)
         sql_response = self.generate_sql(request)
-        current_sql = sql_response.sql_query
+        current_sql = self.sanitize_sql(sql_response.sql_query)
         current_explanation = sql_response.explanation
 
         if not current_sql:
@@ -131,7 +234,6 @@ class SQLAgent:
                 error="Could not generate SQL query",
             )
 
-        # Interview / Redshift whiteboard mode: generate only, do not force SQLite execution.
         if not self.execute_sql_enabled:
             return SQLAgentResponse(
                 natural_query=natural_query,
@@ -141,30 +243,37 @@ class SQLAgent:
                 error=None,
             )
 
-        attempts = 0
+        improvement_history = []
         result = None
         error = None
-        improvement_history = []
 
-        while attempts < self.max_retries:
+        for attempt in range(self.max_retries + 1):
             result, error = self.execute_sql(current_sql)
             if not error:
+                verification = self.verify_result(natural_query, result)
+                if verification and verification.get("checks"):
+                    current_explanation += f"\n\nVerification: {', '.join(verification['checks'])}"
                 break
 
             improvement_history.append(
                 {
-                    "attempt": attempts + 1,
+                    "attempt": attempt + 1,
                     "sql": current_sql,
                     "error": error,
                 }
             )
-            improved_response = self.improve_sql(natural_query, current_sql, error)
-            if not improved_response.sql_query or improved_response.sql_query == current_sql:
+            if attempt >= self.max_retries:
                 break
 
-            current_sql = improved_response.sql_query
-            current_explanation += f"\n\nImproved SQL (attempt {attempts + 1}): {improved_response.explanation}"
-            attempts += 1
+            improved_response = self.improve_sql(natural_query, current_sql, error)
+            improved_sql = self.sanitize_sql(improved_response.sql_query)
+            if not improved_sql or improved_sql == current_sql:
+                break
+
+            current_sql = improved_sql
+            current_explanation += (
+                f"\n\nImproved SQL (attempt {attempt + 1}): {improved_response.explanation}"
+            )
 
         return SQLAgentResponse(
             natural_query=natural_query,

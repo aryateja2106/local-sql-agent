@@ -341,10 +341,11 @@ class LLMClient:
 
         Final answer requirements:
         - Put the final answer in normal assistant content, not only in hidden reasoning
-        - Return ONLY a JSON object, no markdown fences
+        - Return ONLY a compact JSON object, no markdown fences, no extra prose
+        - sql_query must be one statement starting with SELECT or WITH (or COPY in redshift interview mode)
         {{
             "sql_query": "THE SQL QUERY",
-            "explanation": "EXPLANATION OF THE QUERY"
+            "explanation": "one short sentence"
         }}
         """
 
@@ -361,7 +362,8 @@ class LLMClient:
         ]
 
         try:
-            response = self.get_completion(messages, temperature=0.1, max_tokens=2048)
+            # Keep completions shorter for mid-size local models (faster, cooler).
+            response = self.get_completion(messages, temperature=0.1, max_tokens=1024)
             content = self._message_text(response["choices"][0]["message"])
             return self._extract_sql_from_response(content)
         except Exception as e:
@@ -407,7 +409,7 @@ class LLMClient:
         ]
 
         try:
-            response = self.get_completion(messages, temperature=0.1, max_tokens=2048)
+            response = self.get_completion(messages, temperature=0.1, max_tokens=768)
             content = self._message_text(response["choices"][0]["message"])
             return self._extract_sql_from_response(content)
         except Exception as e:
