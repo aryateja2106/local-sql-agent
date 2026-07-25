@@ -48,12 +48,18 @@ class SQLAgent:
                     schema_info += f"- {col_name} ({col_type}) {is_pk}\n"
 
                 try:
-                    self.cursor.execute(f"SELECT * FROM {table} LIMIT 3;")
+                    # Keep samples tiny so local reasoning models do not blow the context window.
+                    self.cursor.execute(f"SELECT * FROM {table} LIMIT 1;")
                     rows = self.cursor.fetchall()
                     if rows:
                         schema_info += "Sample data:\n"
                         for row in rows:
-                            row_dict = {k: row[k] for k in row.keys()}
+                            row_dict = {}
+                            for key in row.keys():
+                                value = row[key]
+                                if isinstance(value, str) and len(value) > 80:
+                                    value = value[:77] + "..."
+                                row_dict[key] = value
                             schema_info += f"- {json.dumps(row_dict, default=str)}\n"
                 except sqlite3.Error:
                     schema_info += "Could not retrieve sample data.\n"

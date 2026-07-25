@@ -102,7 +102,7 @@ class LLMClient:
                 query_terms & set(re.findall(r"[a-z_]+", f"{example['question']} {example.get('pipeline_stage','')}".lower()))
             ),
             reverse=True,
-        )[:3]
+        )[:2]
         if not ranked:
             return ""
 
@@ -122,8 +122,10 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 1000,
+        max_tokens: int = 2048,
     ) -> Dict[str, Any]:
+        # Local reasoning models often spend hundreds of tokens in reasoning_content
+        # before emitting the final answer; keep max_tokens high enough for both.
         payload = {
             "model": self.model_name,
             "messages": messages,
@@ -132,11 +134,27 @@ class LLMClient:
         }
 
         try:
-            response = requests.post(self.chat_endpoint, json=payload, timeout=180)
-            response.raise_for_status()
+            response = requests.post(self.chat_endpoint, json=payload, timeout=300)
+            if not response.ok:
+                detail = response.text[:500]
+                raise Exception(
+                    f"Error communicating with LLM API: {response.status_code} {response.reason}: {detail}"
+                )
             return response.json()
         except requests.exceptions.RequestException as e:
             raise Exception(f"Error communicating with LLM API: {str(e)}")
+
+    @staticmethod
+    def _message_text(message: Dict[str, Any]) -> str:
+        """Prefer final content; fall back to reasoning channels used by local models."""
+        content = (message.get("content") or "").strip()
+        if content:
+            return content
+        for key in ("reasoning_content", "reasoning", "thinking"):
+            value = message.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     def _extract_sql_from_response(self, content: str) -> Dict[str, str]:
         content = self._strip_reasoning(content)
@@ -146,10 +164,12 @@ class LLMClient:
                 json_content = content.split("```json")[1].split("```")[0].strip()
                 result = json.loads(json_content)
                 if "sql_query" in result:
-                    return {
-                        "sql_query": result.get("sql_query", ""),
-                        "explanation": result.get("explanation", ""),
-                    }
+                    return LLMClient._normalize_sql_result(
+                        {
+                            "sql_query": result.get("sql_query", ""),
+                            "explanation": result.get("explanation", ""),
+                        }
+                    )
             except Exception:
                 pass
 
@@ -160,10 +180,22 @@ class LLMClient:
                     sql_query = code_content[3:].strip()
                 else:
                     sql_query = code_content
-                return {
-                    "sql_query": sql_query,
-                    "explanation": "Extracted SQL query from code block",
-                }
+                # If fenced block is JSON, parse it.
+                if sql_query.lstrip().startswith("{"):
+                    parsed = json.loads(sql_query)
+                    if "sql_query" in parsed:
+                        return LLMClient._normalize_sql_result(
+                            {
+                                "sql_query": parsed.get("sql_query", ""),
+                                "explanation": parsed.get("explanation", ""),
+                            }
+                        )
+                return LLMClient._normalize_sql_result(
+                    {
+                        "sql_query": sql_query,
+                        "explanation": "Extracted SQL query from code block",
+                    }
+                )
             except Exception:
                 pass
 
@@ -173,20 +205,24 @@ class LLMClient:
             if start_idx >= 0 and end_idx > start_idx:
                 result = json.loads(content[start_idx:end_idx])
                 if "sql_query" in result:
-                    return {
-                        "sql_query": result.get("sql_query", ""),
-                        "explanation": result.get("explanation", ""),
-                    }
+                    return LLMClient._normalize_sql_result(
+                        {
+                            "sql_query": result.get("sql_query", ""),
+                            "explanation": result.get("explanation", ""),
+                        }
+                    )
         except Exception:
             pass
 
         try:
             result = json.loads(content)
             if "sql_query" in result:
-                return {
-                    "sql_query": result.get("sql_query", ""),
-                    "explanation": result.get("explanation", ""),
-                }
+                return LLMClient._normalize_sql_result(
+                    {
+                        "sql_query": result.get("sql_query", ""),
+                        "explanation": result.get("explanation", ""),
+                    }
+                )
         except Exception:
             pass
 
@@ -203,15 +239,31 @@ class LLMClient:
                         break
             if sql_lines:
                 sql_query = "\n".join(sql_lines).strip().rstrip(";")
-                return {
-                    "sql_query": sql_query,
-                    "explanation": "Extracted SQL query from text",
-                }
+                return self._normalize_sql_result(
+                    {
+                        "sql_query": sql_query,
+                        "explanation": "Extracted SQL query from text",
+                    }
+                )
 
         return {
             "sql_query": "",
             "explanation": f"Error parsing LLM response: {content[:100]}...",
         }
+
+    @staticmethod
+    def _normalize_sql_result(result: Dict[str, str]) -> Dict[str, str]:
+        sql = (result.get("sql_query") or "").strip()
+        # Models sometimes emit a JSON fragment as the SQL field.
+        if sql.startswith('"sql_query"') or sql.startswith("'sql_query'"):
+            match = re.search(r'"sql_query"\s*:\s*"(.*?)"', sql, flags=re.DOTALL)
+            if match:
+                sql = match.group(1).encode("utf-8").decode("unicode_escape")
+        sql = sql.strip().strip("`").strip()
+        if sql.lower().startswith("sql"):
+            sql = sql[3:].strip()
+        result["sql_query"] = sql.rstrip(";").strip()
+        return result
 
     def _domain_guidance(self) -> str:
         if self.domain == "pipeline":
@@ -289,7 +341,9 @@ class LLMClient:
 
         {examples}
 
-        Return ONLY a JSON object:
+        Final answer requirements:
+        - Put the final answer in normal assistant content, not only in hidden reasoning
+        - Return ONLY a JSON object, no markdown fences
         {{
             "sql_query": "THE SQL QUERY",
             "explanation": "EXPLANATION OF THE QUERY"
@@ -309,8 +363,8 @@ class LLMClient:
         ]
 
         try:
-            response = self.get_completion(messages, temperature=0.1, max_tokens=1200)
-            content = response["choices"][0]["message"]["content"]
+            response = self.get_completion(messages, temperature=0.1, max_tokens=2048)
+            content = self._message_text(response["choices"][0]["message"])
             return self._extract_sql_from_response(content)
         except Exception as e:
             return {
@@ -355,8 +409,8 @@ class LLMClient:
         ]
 
         try:
-            response = self.get_completion(messages, temperature=0.1, max_tokens=1200)
-            content = response["choices"][0]["message"]["content"]
+            response = self.get_completion(messages, temperature=0.1, max_tokens=2048)
+            content = self._message_text(response["choices"][0]["message"])
             return self._extract_sql_from_response(content)
         except Exception as e:
             return {
