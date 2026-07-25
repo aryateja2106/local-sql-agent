@@ -4,3 +4,8 @@ requests==2.31.0
 sqlite3-api==2.0.4
 typing-extensions==4.9.0
 python-dotenv==1.0.0
+pandas>=2.0.0
+
+# Optional: rebuild/push the Hugging Face NL2SQL dataset
+# datasets>=2.19.0
+# huggingface_hub>=0.23.0

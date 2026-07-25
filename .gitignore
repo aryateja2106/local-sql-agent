@@ -61,3 +61,8 @@ Thumbs.db
 *.xlsx
 schema.json
 .qodo
+
+# Local datasets / caches
+datasets/hf_southwest_dqe_nl2sql/
+.cache/
+*.db

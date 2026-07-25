@@ -1,179 +1,120 @@
 # Local SQL Agent
 
-A Python-based SQL agent that converts natural language queries into SQL commands, executes them against a SQLite database, and returns the results. The agent uses a local LLM (Language Model) to understand natural language and generate appropriate SQL queries.
+A Python SQL agent that turns natural language into SQL, executes it against a local SQLite practice database, and explains the result. It talks to any OpenAI-compatible local server (LM Studio or Ollama), so you can swap models without changing application code.
+
+It is tuned for **Data Quality Engineer interview prep** around the Southwest-style pipeline:
+
+`Kafka JSON → S3 Bronze (JSONL) → Glue/Spark → S3 Silver/Gold Parquet → Redshift COPY`
 
 ## Features
 
-- Natural language to SQL conversion using a local LLM (with LMStudio or Ollama)
-- SQLite database integration with sample sales data
-- Interactive Streamlit web interface
-- Query execution and result visualization
-- Explanation of generated SQL queries
-- CSV export functionality
-- Database utilities for inspection and maintenance
+- Natural language → SQL through LM Studio / Ollama
+- Automatic preference for stronger loaded models (Qwen3.6 35B, then Gemma 4 12B)
+- Two practice databases:
+  - `pipeline_database.db` — medallion / reconciliation / SCD drills
+  - `sales_database.db` — original purchase/sales demo
+- Streamlit UI with model picker, dialect toggle, and few-shot examples
+- Read-only execution guard (`SELECT` / `WITH` / `EXPLAIN` only)
+- Retry loop that asks the model to repair failed SQL
+- Curated NL→SQL datasets for DQE interview patterns
+- Hugging Face dataset: [`AryaYT/southwest-dqe-nl2sql`](https://huggingface.co/datasets/AryaYT/southwest-dqe-nl2sql)
 
 ## Project Structure
 
-- `purchase_behavior_app.py`: Streamlit web application for user purchase behavior analysis
-- `app.py`: Standard Streamlit web application for general SQL queries
-- `models.py`: Pydantic models for the application
-- `llm_client.py`: Client for communicating with the LLM API (supports both LMStudio and Ollama)
-- `sql_agent.py`: Core SQL agent functionality
-- `setup_database.py`: Script to set up the SQLite database with dummy data
-- `add_user_purchase_data.py`: Script to add user purchase behavior data
-- `db_utils.py`: Utility functions for database management
-- `run.py`: Launcher script for the application
-- `test_agent.py`: Test script for the SQL agent
-- `Dockerfile` & `docker-compose.yml`: Docker configuration for containerization
+- `app.py` — Streamlit UI (pipeline + sales modes)
+- `sql_agent.py` — generate / validate / execute / repair loop
+- `llm_client.py` — OpenAI-compatible local client + few-shot selection
+- `setup_pipeline_database.py` — Kafka→warehouse practice tables
+- `setup_database.py` — original sales demo tables
+- `datasets/southwest_pipeline_nl2sql.jsonl` — curated DQE/pipeline examples
+- `datasets/dqe_interview_examples.jsonl` — shorter interview prompt set
+- `scripts/prepare_hf_dataset.py` — merge curated + Gretel slice and push to HF
+- `test_sql_safety.py` — offline read-only guard tests
 
 ## Prerequisites
 
-- Python 3.7+
-- One of the following local LLM solutions:
-  - [LMStudio](https://lmstudio.ai/) with a local model running at http://127.0.0.1:1234
-  - [Ollama](https://ollama.ai/) with a model like llama3 running at http://127.0.0.1:11434
-- SQLite (included with Python)
+- Python 3.9+
+- [LM Studio](https://lmstudio.ai/) at `http://127.0.0.1:1234` **or** [Ollama](https://ollama.ai/)
+- Recommended local models currently on this machine:
+  - `unsloth/Qwen3.6-35B-A3B` (best SQL reasoning)
+  - `lmstudio-community/gemma-4-12B-it-QAT` (strong mid-size fallback)
 
-## Setup and Installation
-
-### Local Installation
-
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/aryateja2106/local-sql-agent.git
-   cd local-sql-agent
-   ```
-
-2. Create a virtual environment (recommended):
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On macOS/Linux
-   # OR
-   venv\Scripts\activate  # On Windows
-   ```
-
-3. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Set up the database:
-   ```bash
-   python setup_database.py
-   python add_user_purchase_data.py
-   ```
-
-5. Create a `.env` file based on the example:
-   ```bash
-   cp .env.example .env
-   ```
-   Edit the `.env` file to configure your LLM provider (LMStudio or Ollama)
-
-6. Start your local LLM:
-   - For LMStudio: Start the application and ensure it's running at http://127.0.0.1:1234
-   - For Ollama: Install Ollama and run `ollama run llama3` (or your preferred model)
-
-7. Run the Streamlit application using one of these methods:
-   
-   - Using the run script (recommended):
-     ```bash
-     python run.py
-     ```
-   
-   - Direct Streamlit command for purchase behavior analysis:
-     ```bash
-     streamlit run purchase_behavior_app.py
-     ```
-   
-   - Direct Streamlit command for standard SQL queries:
-     ```bash
-     streamlit run app.py
-     ```
-
-### Docker Installation
-
-1. Make sure Docker and Docker Compose are installed on your system
-
-2. Clone this repository:
-   ```bash
-   git clone https://github.com/aryateja2106/local-sql-agent.git
-   cd local-sql-agent
-   ```
-
-3. Start your local LLM:
-   - For LMStudio: Start the application and ensure it's running
-   - For Ollama: Install Ollama and run `ollama run llama3` (or your preferred model)
-
-4. Edit the `docker-compose.yml` file to configure your LLM provider:
-   - For LMStudio (default): Use `LLM_API_URL=http://host.docker.internal:1234`
-   - For Ollama: Use `LLM_API_URL=http://host.docker.internal:11434` and uncomment the `LLM_MODEL` line
-
-5. Build and start the container:
-   ```bash
-   docker-compose up -d
-   ```
-
-6. Access the application at http://localhost:8501
-
-   Note: When using Docker, make sure your LLM is accessible from the container via `host.docker.internal`
-
-### Quick Start with Docker (One-Line Command)
-
-If you have Docker installed and your LLM running, you can start the application with a single command:
+## Setup
 
 ```bash
-docker run -p 8501:8501 -e LLM_API_URL=http://host.docker.internal:1234 $(docker build -q .)
+git clone https://github.com/aryateja2106/local-sql-agent.git
+cd local-sql-agent
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+python setup_pipeline_database.py
+python setup_database.py
+python add_user_purchase_data.py
+
+cp .env.example .env
 ```
 
-For Ollama:
-```bash
-docker run -p 8501:8501 -e LLM_API_URL=http://host.docker.internal:11434 -e LLM_MODEL=llama3 $(docker build -q .)
-```
-
-## Usage
-
-1. Enter a natural language query in the text area
-2. Click "Run Query" to process the query
-3. View the generated SQL, explanation, and results
-4. Download the results as a CSV file if needed
-
-### Example Queries for Purchase Behavior Analysis
-
-- "Show me customers who have purchased products but not services"
-- "List users with high likelihood of purchasing services"
-- "Find customers who haven't purchased anything but have high purchase likelihood"
-- "Show me the top 5 customers most likely to purchase both products and services"
-- "Which customers had their last interaction in the past 30 days and have a high purchase likelihood?"
-
-### Example Queries for Standard SQL Analysis
-
-- "Show me the top 5 customers by total order amount"
-- "What are the most popular products in the Electronics category?"
-- "How many orders were placed in the last 6 months?"
-- "Which customers have not placed any orders?"
-- "What is the average order value by product category?"
-
-## Database Utilities
-
-The project includes a database utility script (`db_utils.py`) for database management:
+Load a model in LM Studio, then:
 
 ```bash
-# Run an interactive SQL session
-python db_utils.py interactive sales_database.db
-
-# Export database schema to JSON
-python db_utils.py export_schema sales_database.db schema.json
-
-# Export query results to CSV
-python db_utils.py export_query sales_database.db "SELECT * FROM customers" customers.csv
-
-# Import CSV data to a table
-python db_utils.py import_csv sales_database.db new_products.csv products
+python run.py
+# or
+streamlit run app.py
 ```
+
+## Interview-focused usage
+
+1. In the sidebar, choose **Pipeline (Kafka→S3→Glue→Redshift)**
+2. Keep dialect on **sqlite** to execute against the practice DB
+3. Switch dialect to **redshift** when you want whiteboard-style `COPY` / `QUALIFY` answers without local execution
+4. Keep **Use interview few-shot examples** enabled
+
+### Example pipeline prompts
+
+- Find the percentage of silver booking events with a missing customer ID
+- Keep the newest bronze version of each event ID
+- Find silver bookings missing from the Redshift fact table
+- Reconcile source vs target orders (source-only / target-only / mismatch)
+- Find staged customers that need a new SCD Type 2 version
+- Balance Bronze accepted + quarantined counts against Silver
+
+### Practice table map
+
+| Table | Pipeline meaning |
+| --- | --- |
+| `bronze_events` | Raw Kafka landing + coordinates |
+| `quarantine_events` | Rejected Bronze records |
+| `silver_booking_events` | Clean, deduped events |
+| `gold_daily_booking_metrics` | Business aggregates / DQ metrics |
+| `redshift_fact_orders` | Warehouse fact after COPY |
+| `source_orders` / `target_orders` | Reconciliation drills |
+| `dim_customer` / `staged_customer` | SCD Type 2 drills |
+| `batch_control` | Stage count balance |
+
+## Dataset
+
+Curated examples live in `datasets/`. To rebuild and push the Hugging Face dataset:
+
+```bash
+pip install datasets huggingface_hub
+huggingface-cli login   # if needed
+python scripts/prepare_hf_dataset.py --gretel-limit 250 --push --repo-id AryaYT/southwest-dqe-nl2sql
+```
+
+This merges:
+
+1. Hand-written Southwest DQE / medallion SQL examples
+2. A filtered slice of [`gretelai/synthetic_text_to_sql`](https://huggingface.co/datasets/gretelai/synthetic_text_to_sql) focused on joins, windows, CTEs, and analytics prompts useful for interview SQL
 
 ## Testing
 
-Run the test script to verify the functionality:
+```bash
+python -m unittest test_sql_safety.py
+python setup_pipeline_database.py
+```
+
+With a local model loaded:
 
 ```bash
 python test_agent.py
@@ -181,16 +122,15 @@ python test_agent.py
 
 ## Environment Variables
 
-The application uses the following environment variables that can be set in the `.env` file:
-
-- `LLM_API_URL`: URL of the LLM API
-  - For LMStudio: `http://127.0.0.1:1234` (default)
-  - For Ollama: `http://127.0.0.1:11434`
-- `LLM_MODEL`: Model name to use (especially important for Ollama)
-  - Default for Ollama: `llama3`
-  - Default for LMStudio: `deepseek-r1-distill-qwen-14b`
-- `DATABASE_PATH`: Path to the SQLite database (default: `sales_database.db`)
+| Variable | Purpose |
+| --- | --- |
+| `LLM_API_URL` | LM Studio (`http://127.0.0.1:1234`) or Ollama |
+| `LLM_MODEL` | Optional explicit model id |
+| `DATABASE_PATH` | Default DB path |
+| `SQL_DIALECT` | `sqlite` or `redshift` |
+| `SQL_AGENT_DOMAIN` | `pipeline` or `sales` |
+| `SQL_AGENT_FEW_SHOT_PATH` | JSONL few-shot file |
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT — see `LICENSE`.
