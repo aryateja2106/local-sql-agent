@@ -9,7 +9,7 @@ It is tuned for **Data Quality Engineer interview prep** around the Southwest-st
 ## Features
 
 - Natural language → SQL through LM Studio / Ollama
-- Automatic preference for stronger loaded models (Qwen3.6 35B, then Gemma 4 12B)
+- Default local model: **Gemma 4 12B Instruct QAT** (fits a 24GB M4 Pro without pinning ~12GB unified memory)
 - Two practice databases:
   - `pipeline_database.db` — medallion / reconciliation / SCD drills
   - `sales_database.db` — original purchase/sales demo
@@ -35,9 +35,10 @@ It is tuned for **Data Quality Engineer interview prep** around the Southwest-st
 
 - Python 3.9+
 - [LM Studio](https://lmstudio.ai/) at `http://127.0.0.1:1234` **or** [Ollama](https://ollama.ai/)
-- Recommended local models currently on this machine:
-  - `unsloth/Qwen3.6-35B-A3B` (best SQL reasoning)
-  - `lmstudio-community/gemma-4-12B-it-QAT` (strong mid-size fallback)
+- Recommended local model for this machine:
+  - `lmstudio-community/gemma-4-12B-it-QAT` (**default**; ~7GB resident)
+  - Avoid keeping `Qwen3.6-35B` loaded on 24GB unified memory — it can pin ~12GB GPU/wired RAM and run very hot
+  - Cool load helper: `./scripts/cool_load.sh` (Gemma, context 4096, parallel 1)
 
 ## Setup
 
@@ -55,12 +56,16 @@ python add_user_purchase_data.py
 cp .env.example .env
 ```
 
-Load a model in LM Studio, then:
+Load the cool default model, then start the UI (one query at a time):
 
 ```bash
+./scripts/cool_load.sh          # gemma-4-12b-it-qat, parallel=1
 python run.py
 # or
 streamlit run app.py
+
+# when finished practicing:
+lms unload --all && lms server stop
 ```
 
 ## Interview-focused usage

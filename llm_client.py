@@ -8,13 +8,11 @@ import requests
 from dotenv import load_dotenv
 
 
+# Default stack for 24GB Apple Silicon: Gemma 4 12B QAT only.
+# Qwen 3.6 35B can pin ~12GB unified memory and is intentionally not auto-selected.
 PREFERRED_MODEL_SUBSTRINGS = [
-    "qwen3.6-35b",
-    "qwen3.6",
     "gemma-4-12b",
     "gemma-4",
-    "qwen3",
-    "deepseek-r1",
 ]
 
 
@@ -38,7 +36,7 @@ class LLMClient:
         self.domain = (domain or os.getenv("SQL_AGENT_DOMAIN", "sales")).lower()
         self.few_shot_examples = self._load_few_shot_examples(few_shot_path)
         configured = model_name or os.getenv("LLM_MODEL")
-        self.model_name = configured or self.prefer_model(self.list_models()) or "qwen3.6-35b-a3b-ud-iq1_m"
+        self.model_name = configured or self.prefer_model(self.list_models()) or "gemma-4-12b-it-qat"
 
     @staticmethod
     def prefer_model(model_ids: List[str]) -> Optional[str]:

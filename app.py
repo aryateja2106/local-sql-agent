@@ -23,7 +23,8 @@ st.sidebar.title("SQL Agent")
 st.sidebar.info(
     "Natural language → SQL against a local practice database, using LM Studio / Ollama. "
     "Use the Pipeline DB for Southwest DQE interview drills "
-    "(Kafka → S3 Bronze → Glue → Parquet → Redshift)."
+    "(Kafka → S3 Bronze → Glue → Parquet → Redshift). "
+    "Default model on this machine: Gemma 4 12B QAT. Avoid Qwen 3.6 35B (too heavy for 24GB)."
 )
 
 db_choice = st.sidebar.selectbox(
@@ -85,13 +86,23 @@ try:
     )
     available_models = llm_client.list_models()
     if available_models:
-        preferred = LLMClient.prefer_model(available_models)
-        default_index = available_models.index(preferred) if preferred in available_models else 0
+        preferred = LLMClient.prefer_model(available_models) or llm_client.model_name
         if llm_client.model_name in available_models:
             default_index = available_models.index(llm_client.model_name)
+        elif preferred in available_models:
+            default_index = available_models.index(preferred)
+        else:
+            default_index = 0
         llm_client.model_name = st.sidebar.selectbox("Loaded local model", available_models, index=default_index)
+        if "qwen3.6" in llm_client.model_name.lower() or "35b" in llm_client.model_name.lower():
+            st.sidebar.warning(
+                "This model is too heavy for the 24GB profile. Prefer gemma-4-12b-it-qat "
+                "and unload Qwen when idle."
+            )
     else:
         llm_client.model_name = st.sidebar.text_input("Model ID", value=llm_client.model_name)
+
+    st.sidebar.caption("Thermal tip: one query at a time. Unload the model when finished.")
 
     sql_agent = SQLAgent(str(db_path), llm_client, execute_sql=execute_sql)
 except Exception as e:
